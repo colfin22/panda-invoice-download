@@ -71,6 +71,10 @@ systemctl daemon-reload && systemctl enable --now panda-invoice-download.timer
 
 ## Notes
 
+- Some old invoices have no PDF on Panda's side (the portal answers "Bad Request"). An invoice
+  older than 30 days with no PDF is recorded in `STATE_DIR/no_pdf.json` and skipped from then on;
+  a newer one counts as a failure and is retried on the next run (Panda may not have generated it yet).
+- One failed invoice does not stop the run; failures are reported together at the end.
 - The portal's `hasTransactionFile` flag is `false` even for invoices that download fine, so the
   script ignores it.
 - The B2C client ID and policy name in the script are public values from the portal's web app.

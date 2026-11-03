@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 LOG = logging.getLogger("panda-invoice-download")
 
@@ -52,6 +52,10 @@ class RunError(Exception):
 
 class ConfigError(Exception):
     pass
+
+
+class NoPdf(RunError):
+    """Panda has no PDF for this invoice (the portal answers 'Bad Request')."""
 
 
 # --------------------------------------------------------------------------- config
@@ -223,6 +227,8 @@ class Panda:
         body = r.json() if r.status_code == 200 else {}
         sas = (body.get("data") or {}).get("sasUri")
         if not sas:
+            if r.status_code == 200 and body.get("apiHttpStatus") == 400:
+                raise NoPdf(step, f"Panda has no PDF for it ({body.get('apiMessages')})")
             raise RunError(step, f"HTTP {r.status_code}, apiHttpStatus {body.get('apiHttpStatus')}, no link")
         step = f"invoice {number} download"
         pdf = self._req(self.http, "GET", sas, step)
@@ -311,7 +317,11 @@ def alert(cfg: Config, message: str) -> None:
         LOG.error("alert webhook failed: %s", exc)
 
 
-def run(cfg: Config, dry_run: bool) -> int:
+NO_PDF_GRACE_DAYS = 30   # a newer invoice without a PDF may not be generated yet: retry it
+
+
+def run(cfg: Config, dry_run: bool) -> tuple[int, list[str]]:
+    """Returns (number of new invoices, list of failures). One failed invoice does not stop the run."""
     panda, paperless = Panda(cfg), Paperless(cfg)
     paperless.check_filter()
     panda.login()
@@ -320,9 +330,17 @@ def run(cfg: Config, dry_run: bool) -> int:
         invoices = [t for t in invoices if dt.date.fromisoformat(t["transactionDate"][:10]) >= cfg.since]
     LOG.info("%d invoice(s) on the Panda account%s", len(invoices),
              f" since {cfg.since}" if cfg.since else "")
-    new = 0
+    no_pdf_file = cfg.state_dir / "no_pdf.json"
+    try:
+        no_pdf = set(json.loads(no_pdf_file.read_text()))
+    except (OSError, ValueError):
+        no_pdf = set()
+    new, failures = 0, []
     for inv in sorted(invoices, key=lambda t: t["transactionDate"]):
         number, date = inv["transactionNumber"], inv["transactionDate"][:10]
+        if number in no_pdf:
+            LOG.debug("invoice %s (%s): Panda has no PDF (known), skipped", number, date)
+            continue
         if paperless.has_transaction(number):
             LOG.debug("invoice %s (%s) already in Paperless", number, date)
             continue
@@ -331,16 +349,33 @@ def run(cfg: Config, dry_run: bool) -> int:
                      inv.get("transactionAmount"))
             new += 1
             continue
-        name, content = panda.download(number)
-        result = paperless.wait(paperless.upload(name, content), name)
+        try:
+            name, content = panda.download(number)
+            result = paperless.wait(paperless.upload(name, content), name)
+        except NoPdf as exc:
+            age = (dt.date.today() - dt.date.fromisoformat(date)).days
+            if age > NO_PDF_GRACE_DAYS:
+                LOG.warning("invoice %s (%s, %d days old): Panda has no PDF, recorded and skipped from now on",
+                            number, date, age)
+                no_pdf.add(number)
+                continue
+            LOG.error("%s", exc)
+            failures.append(f"invoice {number} ({date}): no PDF yet")
+            continue
+        except RunError as exc:
+            LOG.error("%s", exc)
+            failures.append(f"invoice {number} ({date}): {exc}")
+            continue
         LOG.info("invoice %s (%s, €%s) -> Paperless: %s (%s)", number, date,
                  inv.get("transactionAmount"), result, name)
         new += 1
-    LOG.info("%s %d new invoice(s)", "would upload" if dry_run else "uploaded", new)
+    LOG.info("%s %d new invoice(s), %d failed", "would upload" if dry_run else "uploaded", new, len(failures))
     if not dry_run:
         cfg.state_dir.mkdir(parents=True, exist_ok=True)
-        (cfg.state_dir / "last_success").write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n")
-    return 0
+        no_pdf_file.write_text(json.dumps(sorted(no_pdf)) + "\n")
+        if not failures:
+            (cfg.state_dir / "last_success").write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n")
+    return new, failures
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -363,12 +398,17 @@ def main(argv: list[str] | None = None) -> int:
         LOG.error("configuration: %s", exc)
         return 2
     try:
-        return run(cfg, a.dry_run)
+        _, failures = run(cfg, a.dry_run)
     except RunError as exc:
         LOG.error("%s", exc)
         if not a.dry_run:
             alert(cfg, f"Panda invoice download failed at '{exc.step}': {exc}")
         return 1
+    if failures:
+        if not a.dry_run:
+            alert(cfg, f"{len(failures)} Panda invoice(s) failed: " + "; ".join(failures[:5]))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
