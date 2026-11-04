@@ -1,5 +1,5 @@
 [Unit]
-Description=Check for new Panda waste invoices (a run every 6 hours; see the retry drop-in)
+Description=Collect Panda waste data (a run every 6 hours; see the retry drop-in)
 
 [Timer]
 OnCalendar=*-*-* 05,11,17,23:15

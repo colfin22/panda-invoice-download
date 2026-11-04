@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Panda waste invoices into Paperless-ngx and bin weights into InfluxDB
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/panda-waste-data-scraper/.venv/bin/python /opt/panda-waste-data-scraper/panda_waste_data_scraper.py --env-file /etc/panda-waste-data-scraper/panda.env
+TimeoutStartSec=30min
+StateDirectory=panda-waste-data-scraper

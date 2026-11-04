@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download Panda (Ireland) household waste invoices and upload new ones to Paperless-ngx.
+"""Collect Panda (Ireland) household waste data: invoices to Paperless-ngx, bin weights to InfluxDB.
 
 Panda does not email invoices; they are only available from the customer portal
 (https://my.panda.ie). This script signs in to the portal the same way the web app does
@@ -31,9 +31,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
-LOG = logging.getLogger("panda-invoice-download")
+LOG = logging.getLogger("panda-waste-data-scraper")
 
 # Public values from the Panda portal's own web app (my.panda.ie), not secrets.
 B2C_TENANT = "https://PandaGateway.b2clogin.com/PandaGateway.onmicrosoft.com"
@@ -42,7 +42,7 @@ CLIENT_ID = "65362d56-6131-4630-8d93-91544097b425"
 REDIRECT_URI = "https://my.panda.ie/"
 SCOPE = "openid offline_access https://PandaGateway.onmicrosoft.com/api/User"
 API = "https://pandagateway.azurewebsites.net/api"
-USER_AGENT = f"panda-invoice-download/{__version__}"
+USER_AGENT = f"panda-waste-data-scraper/{__version__}"
 
 
 class RunError(Exception):
@@ -121,7 +121,7 @@ class Config:
             password=os.environ["PANDA_PASSWORD"],
             paperless_url=os.environ["PAPERLESS_URL"].rstrip("/"),
             paperless_token=os.environ["PAPERLESS_TOKEN"],
-            state_dir=Path(os.environ.get("STATE_DIR", "/var/lib/panda-invoice-download")),
+            state_dir=Path(os.environ.get("STATE_DIR", "/var/lib/panda-waste-data-scraper")),
             timeout=timeout,
             retries=max(1, retries),
             since=since_date,
@@ -344,7 +344,7 @@ def alert(cfg: Config, message: str) -> None:
     if not cfg.alert_webhook:
         return
     try:
-        requests.post(cfg.alert_webhook, json={"source": "panda-invoice-download", "message": message},
+        requests.post(cfg.alert_webhook, json={"source": "panda-waste-data-scraper", "message": message},
                       timeout=20)
     except requests.RequestException as exc:
         LOG.error("alert webhook failed: %s", exc)
@@ -482,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     except RunError as exc:
         LOG.error("%s", exc)
         if not a.dry_run:
-            alert(cfg, f"Panda invoice download failed at '{exc.step}': {exc}")
+            alert(cfg, f"Panda run failed at '{exc.step}': {exc}")
         return 1
     if failures:
         if not a.dry_run:

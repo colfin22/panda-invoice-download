@@ -7,8 +7,6 @@ Collects your household waste data from the [Panda](https://www.panda.ie) custom
   Panda doesn't email invoices; you have to sign in and download each one.
 - **Bin collection weights (optional):** writes the weight of every collection to InfluxDB.
 
-The script, service and install folders keep the project's original name, `panda-invoice-download`.
-
 ## How it works
 
 1. Signs in to the portal the same way its web app does (Azure AD B2C, authorization code + PKCE).
@@ -32,11 +30,11 @@ If InfluxDB is set up, each run also sends the bin collections
 Python 3.10+.
 
 ```sh
-git clone https://github.com/colfin22/panda-waste-data-scraper /opt/panda-invoice-download
-cd /opt/panda-invoice-download
+git clone https://github.com/colfin22/panda-waste-data-scraper /opt/panda-waste-data-scraper
+cd /opt/panda-waste-data-scraper
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-install -d -m 700 /etc/panda-invoice-download
-install -m 600 .env.example /etc/panda-invoice-download/panda.env   # then edit it
+install -d -m 700 /etc/panda-waste-data-scraper
+install -m 600 .env.example /etc/panda-waste-data-scraper/panda.env   # then edit it
 ```
 
 Settings (all in the env file, see `.env.example`):
@@ -47,7 +45,7 @@ Settings (all in the env file, see `.env.example`):
 | `PAPERLESS_URL`, `PAPERLESS_TOKEN` | yes | Paperless base URL and API token |
 | `SINCE` | no | Only invoices dated on or after this day (`YYYY-MM-DD`) |
 | `HTTP_TIMEOUT`, `HTTP_RETRIES` | no | Per-request timeout in seconds (120) and attempts (3); the portal can be slow |
-| `STATE_DIR` | no | Where `last_success` is written (`/var/lib/panda-invoice-download`) |
+| `STATE_DIR` | no | Where `last_success` is written (`/var/lib/panda-waste-data-scraper`) |
 | `ALERT_WEBHOOK` | no | Gets a JSON POST `{"source": ..., "message": ...}` when a run fails |
 | `INFLUX_URL`, `INFLUX_TOKEN`, `INFLUX_ORG`, `INFLUX_BUCKET` | no | Also record bin collections in InfluxDB 2.x (see below) |
 | `LIFTS_SINCE` | no | Only bin collections on or after this day (`YYYY-MM-DD`) |
@@ -56,7 +54,7 @@ Settings (all in the env file, see `.env.example`):
 Try it without changing anything:
 
 ```sh
-.venv/bin/python panda_invoice_download.py --env-file /etc/panda-invoice-download/panda.env --dry-run
+.venv/bin/python panda_waste_data_scraper.py --env-file /etc/panda-waste-data-scraper/panda.env --dry-run
 ```
 
 The first real run uploads every invoice on the account that Paperless doesn't have (use `SINCE`
@@ -88,10 +86,24 @@ when one has already succeeded today. So you get one run a day, and a failed run
 hours later.
 
 ```sh
-cp examples/systemd/panda-invoice-download.{service,timer} /etc/systemd/system/
-cp -r examples/systemd/panda-invoice-download.service.d /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now panda-invoice-download.timer
+cp examples/systemd/panda-waste-data-scraper.{service,timer} /etc/systemd/system/
+cp -r examples/systemd/panda-waste-data-scraper.service.d /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now panda-waste-data-scraper.timer
 ```
+
+## Upgrading from 1.x
+
+2.0.0 renames the script, the systemd units and the default folders from `panda-invoice-download`
+to `panda-waste-data-scraper`. Nothing else changes. Stop and disable the old timer, then:
+
+```sh
+mv /etc/panda-invoice-download /etc/panda-waste-data-scraper
+mv /var/lib/panda-invoice-download /var/lib/panda-waste-data-scraper
+```
+
+Change `STATE_DIR` in `panda.env` if it's set, clone and set up the new folder as above, install the
+new units, and remove the old units and `/opt/panda-invoice-download`. Moving the state folder keeps
+`no_pdf.json` and `last_success`.
 
 ## Exit codes
 
