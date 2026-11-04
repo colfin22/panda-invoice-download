@@ -1,4 +1,4 @@
-# panda-invoice-download
+# panda-waste-data-scraper
 
 Downloads household waste invoices from the [Panda](https://www.panda.ie) customer portal
 (my.panda.ie) and uploads the ones you don't have yet to [Paperless-ngx](https://docs.paperless-ngx.com).
@@ -26,7 +26,7 @@ workflow trigger.
 Python 3.10+.
 
 ```sh
-git clone https://github.com/colfin22/panda-invoice-download /opt/panda-invoice-download
+git clone https://github.com/colfin22/panda-waste-data-scraper /opt/panda-invoice-download
 cd /opt/panda-invoice-download
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 install -d -m 700 /etc/panda-invoice-download
