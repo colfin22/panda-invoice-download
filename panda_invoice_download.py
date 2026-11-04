@@ -27,10 +27,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 LOG = logging.getLogger("panda-invoice-download")
 
@@ -85,6 +86,17 @@ class Config:
     retries: int
     since: dt.date | None
     alert_webhook: str | None
+    influx_url: str | None = None
+    influx_token: str | None = None
+    influx_org: str = ""
+    influx_bucket: str = ""
+    lifts_measurement: str = "bin_lifts"
+    lifts_since: dt.date | None = None
+    timezone: str = "Europe/Dublin"
+
+    @property
+    def lifts_enabled(self) -> bool:
+        return bool(self.influx_url and self.influx_token)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -92,9 +104,14 @@ class Config:
                    if not os.environ.get(k)]
         if missing:
             raise ConfigError(f"missing required setting(s): {', '.join(missing)}")
+        if os.environ.get("INFLUX_URL") and not all(
+                os.environ.get(k) for k in ("INFLUX_TOKEN", "INFLUX_ORG", "INFLUX_BUCKET")):
+            raise ConfigError("INFLUX_URL is set, so INFLUX_TOKEN, INFLUX_ORG and INFLUX_BUCKET are required too")
         since = os.environ.get("SINCE") or None
         try:
             since_date = dt.date.fromisoformat(since) if since else None
+            lifts_since = os.environ.get("LIFTS_SINCE") or None
+            lifts_since_date = dt.date.fromisoformat(lifts_since) if lifts_since else None
             timeout = int(os.environ.get("HTTP_TIMEOUT", "120"))
             retries = int(os.environ.get("HTTP_RETRIES", "3"))
         except ValueError as exc:
@@ -109,6 +126,13 @@ class Config:
             retries=max(1, retries),
             since=since_date,
             alert_webhook=os.environ.get("ALERT_WEBHOOK") or None,
+            influx_url=(os.environ.get("INFLUX_URL") or "").rstrip("/") or None,
+            influx_token=os.environ.get("INFLUX_TOKEN") or None,
+            influx_org=os.environ.get("INFLUX_ORG", ""),
+            influx_bucket=os.environ.get("INFLUX_BUCKET", ""),
+            lifts_measurement=os.environ.get("LIFTS_MEASUREMENT") or "bin_lifts",
+            lifts_since=lifts_since_date,
+            timezone=os.environ.get("PANDA_TIMEZONE") or "Europe/Dublin",
         )
 
 
@@ -220,6 +244,15 @@ class Panda:
         # NB: the portal's hasTransactionFile flag is false even for invoices that download fine.
         return [t for t in body["data"] if t.get("transactionType") == "Invoice"]
 
+    def lifts(self) -> list[dict]:
+        """Bin collections with their weight: [{liftDate, material, weight, ...}] (portal 'Collection history')."""
+        step = "list bin collections"
+        r = self._req(self.api, "GET", f"{API}/domestic/Account/lifts", step)
+        body = r.json() if r.status_code == 200 else {}
+        if body.get("apiHttpStatus") != 200 or not isinstance(body.get("data"), list):
+            raise RunError(step, f"HTTP {r.status_code}, apiHttpStatus {body.get('apiHttpStatus')}")
+        return body["data"]
+
     def download(self, number: int) -> tuple[str, bytes]:
         step = f"invoice {number} link"
         r = self._req(self.api, "GET", f"{API}/domestic/Account/invoice-pdf", step,
@@ -317,6 +350,38 @@ def alert(cfg: Config, message: str) -> None:
         LOG.error("alert webhook failed: %s", exc)
 
 
+def _tag(value: str) -> str:
+    return re.sub(r"([ ,=])", r"\\\1", value)
+
+
+def lift_lines(cfg: Config, lifts: list[dict]) -> list[str]:
+    """InfluxDB line protocol, one point per bin per collection. The portal gives local times
+    without an offset; they are read in PANDA_TIMEZONE. weight_kg is ALWAYS written as a float:
+    InfluxDB fixes a field's type at its first write in each shard and refuses the other type."""
+    tz = ZoneInfo(cfg.timezone)
+    lines = []
+    for lift in lifts:
+        when = dt.datetime.fromisoformat(str(lift["liftDate"]))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=tz)
+        weight = float(lift["weight"])
+        lines.append(f"{cfg.lifts_measurement},material={_tag(str(lift['material']))} "
+                     f"weight_kg={weight} {int(when.timestamp())}")
+    return lines
+
+
+def write_lifts(cfg: Config, lines: list[str]) -> None:
+    step = "write bin collections to InfluxDB"
+    r = request(requests.Session(), "POST", f"{cfg.influx_url}/api/v2/write", step,
+                retries=cfg.retries, timeout=cfg.timeout,
+                params={"org": cfg.influx_org, "bucket": cfg.influx_bucket, "precision": "s"},
+                headers={"Authorization": f"Token {cfg.influx_token}",
+                         "Content-Type": "text/plain; charset=utf-8"},
+                data="\n".join(lines).encode())
+    if r.status_code != 204:
+        raise RunError(step, f"HTTP {r.status_code} {r.text[:300]}")
+
+
 NO_PDF_GRACE_DAYS = 30   # a newer invoice without a PDF may not be generated yet: retry it
 
 
@@ -370,6 +435,21 @@ def run(cfg: Config, dry_run: bool) -> tuple[int, list[str]]:
                  inv.get("transactionAmount"), result, name)
         new += 1
     LOG.info("%s %d new invoice(s), %d failed", "would upload" if dry_run else "uploaded", new, len(failures))
+    if cfg.lifts_enabled:
+        try:
+            lifts = panda.lifts()
+            if cfg.lifts_since:
+                lifts = [x for x in lifts if dt.date.fromisoformat(str(x["liftDate"])[:10]) >= cfg.lifts_since]
+            lines = lift_lines(cfg, lifts)
+            if dry_run:
+                LOG.info("would write %d bin collection(s) to InfluxDB", len(lines))
+            else:
+                write_lifts(cfg, lines)
+                LOG.info("wrote %d bin collection(s) to InfluxDB measurement %s", len(lines),
+                         cfg.lifts_measurement)
+        except (RunError, KeyError, ValueError, TypeError) as exc:
+            LOG.error("bin collections: %s", exc)
+            failures.append(f"bin collections: {exc}")
     if not dry_run:
         cfg.state_dir.mkdir(parents=True, exist_ok=True)
         no_pdf_file.write_text(json.dumps(sorted(no_pdf)) + "\n")
@@ -406,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if failures:
         if not a.dry_run:
-            alert(cfg, f"{len(failures)} Panda invoice(s) failed: " + "; ".join(failures[:5]))
+            alert(cfg, f"{len(failures)} Panda step(s) failed: " + "; ".join(failures[:5]))
         return 1
     return 0
 

@@ -43,6 +43,9 @@ Settings (all in the env file, see `.env.example`):
 | `HTTP_TIMEOUT`, `HTTP_RETRIES` | no | Per-request timeout in seconds (120) and attempts (3); the portal can be slow |
 | `STATE_DIR` | no | Where `last_success` is written (`/var/lib/panda-invoice-download`) |
 | `ALERT_WEBHOOK` | no | Gets a JSON POST `{"source": ..., "message": ...}` when a run fails |
+| `INFLUX_URL`, `INFLUX_TOKEN`, `INFLUX_ORG`, `INFLUX_BUCKET` | no | Also record bin collections in InfluxDB 2.x (see below) |
+| `LIFTS_SINCE` | no | Only bin collections on or after this day (`YYYY-MM-DD`) |
+| `LIFTS_MEASUREMENT`, `PANDA_TIMEZONE` | no | Measurement name (`bin_lifts`) and the time zone of the portal's collection times (`Europe/Dublin`) |
 
 Try it without changing anything:
 
@@ -52,6 +55,25 @@ Try it without changing anything:
 
 The first real run uploads every invoice on the account that Paperless doesn't have (use `SINCE`
 to limit that).
+
+## Optional: bin collection weights in InfluxDB
+
+The portal also lists every bin collection with its weight (the "Collection history" on the
+waste page). If `INFLUX_URL` is set, each run writes all of them to InfluxDB as one point per bin
+per collection:
+
+```
+bin_lifts,material=Waste weight_kg=13.0 <collection time>
+bin_lifts,material=Recycling weight_kg=3.0 <collection time>
+bin_lifts,material=Compost weight_kg=11.6 <collection time>
+```
+
+Rewriting a collection overwrites the same point, so the whole history is simply re-sent each
+run. `weight_kg` is always a float. A failure here is reported like a failed invoice and does not
+stop invoices being uploaded.
+
+The portal's collection history can have gaps of months; the
+invoices still list the kg per billing period for those times.
 
 ## Running it daily (systemd)
 
