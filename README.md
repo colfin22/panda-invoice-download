@@ -1,10 +1,13 @@
 # panda-waste-data-scraper
 
-Downloads household waste invoices from the [Panda](https://www.panda.ie) customer portal
-(my.panda.ie) and uploads the ones you don't have yet to [Paperless-ngx](https://docs.paperless-ngx.com).
+Collects your household waste data from the [Panda](https://www.panda.ie) customer portal
+(my.panda.ie) on a schedule:
 
-Panda doesn't email invoices; you have to sign in and download each one. This script does that on a
-schedule.
+- **Invoices:** uploads the ones you don't have yet to [Paperless-ngx](https://docs.paperless-ngx.com).
+  Panda doesn't email invoices; you have to sign in and download each one.
+- **Bin collection weights (optional):** writes the weight of every collection to InfluxDB.
+
+The script, service and install folders keep the project's original name, `panda-invoice-download`.
 
 ## How it works
 
@@ -20,6 +23,9 @@ schedule.
 Anything Paperless does with the document afterwards (title, correspondent, tags) is up to your
 Paperless matching rules and workflows. The file name pattern `INV[0-9]*_*.pdf` is handy for a
 workflow trigger.
+
+If InfluxDB is set up, each run also sends the bin collections
+([details below](#optional-bin-collection-weights-in-influxdb)).
 
 ## Setup
 
@@ -72,8 +78,8 @@ Rewriting a collection overwrites the same point, so the whole history is simply
 run. `weight_kg` is always a float. A failure here is reported like a failed invoice and does not
 stop invoices being uploaded.
 
-The portal's collection history can have gaps of months; the
-invoices still list the kg per billing period for those times.
+The portal's collection history can have gaps of months; the invoices still list the kg per billing
+period for those times.
 
 ## Running it daily (systemd)
 
